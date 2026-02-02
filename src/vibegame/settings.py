@@ -1,8 +1,10 @@
 """Game constants and configuration."""
 
 # Window settings
-WINDOW_WIDTH = 800
-WINDOW_HEIGHT = 600
+DEFAULT_WINDOW_WIDTH = 840
+DEFAULT_WINDOW_HEIGHT = 600
+MIN_WINDOW_WIDTH = 640
+MIN_WINDOW_HEIGHT = 480
 WINDOW_TITLE = "Vibegame"
 FPS = 60
 
@@ -33,7 +35,7 @@ STARTING_HAPPINESS = 50.0
 STARTING_MILITARY = 25.0
 
 # Stat interactions
-HAPPINESS_DECAY_PER_TURN = 5.0
+HAPPINESS_DECAY_RATE = 0.10  # 10% decay per turn
 RESOURCE_SPEND_INCREMENT = 10.0
 
 # Stat normalization (prevents overflow from large numbers)
@@ -44,10 +46,8 @@ STAT_SCALE_SUFFIXES = ["", "K", "M", "B", "T", "C", "Q"]  # Scale level suffixes
 # Map
 MAP_COLS = 10
 MAP_ROWS = 8
-TERRITORY_SIZE = 60  # pixels
 TERRITORY_BORDER = 2  # pixels
 
-# UI
-STATS_PANEL_WIDTH = 200
-MAP_OFFSET_X = 20
-MAP_OFFSET_Y = 20
+# UI layout ratios (for proportional scaling)
+STATS_PANEL_RATIO = 0.24  # Stats panel takes 24% of window width
+MAP_MARGIN_RATIO = 0.025  # Margin around map as percentage of available space

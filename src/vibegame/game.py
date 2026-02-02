@@ -7,12 +7,15 @@ import pygame
 from vibegame.actions.attack import AttackAction
 from vibegame.ai.controller import AIController
 from vibegame.settings import (
+    DEFAULT_WINDOW_HEIGHT,
+    DEFAULT_WINDOW_WIDTH,
     FPS,
-    HAPPINESS_DECAY_PER_TURN,
+    GRAY,
+    HAPPINESS_DECAY_RATE,
     MAP_COLS,
-    MAP_OFFSET_X,
-    MAP_OFFSET_Y,
     MAP_ROWS,
+    MIN_WINDOW_HEIGHT,
+    MIN_WINDOW_WIDTH,
     NUM_TEAMS,
     STARTING_HAPPINESS,
     STARTING_MILITARY,
@@ -22,12 +25,10 @@ from vibegame.settings import (
     STAT_SCALE_SUFFIXES,
     TEAM_COLORS,
     TEAM_NAMES,
-    TERRITORY_SIZE,
-    WINDOW_HEIGHT,
     WINDOW_TITLE,
-    WINDOW_WIDTH,
 )
 from vibegame.team import Team
+from vibegame.ui.layout import Layout
 from vibegame.ui.renderer import Renderer
 from vibegame.world.map import GameMap
 from vibegame.world.territory import Territory
@@ -48,7 +49,9 @@ class Game:
     def __init__(self) -> None:
         """Initialize pygame and create the game window."""
         pygame.init()
-        self.screen = pygame.display.set_mode((WINDOW_WIDTH, WINDOW_HEIGHT))
+        self.screen = pygame.display.set_mode(
+            (DEFAULT_WINDOW_WIDTH, DEFAULT_WINDOW_HEIGHT), pygame.RESIZABLE
+        )
         pygame.display.set_caption(WINDOW_TITLE)
         self.clock = pygame.time.Clock()
         self.running = True
@@ -61,8 +64,9 @@ class Game:
         self.current_team_index = 0
         self.phase = GamePhase.PLAYER_TURN
 
-        # UI
-        self.renderer = Renderer(self.screen)
+        # UI with dynamic layout
+        self.layout = Layout(DEFAULT_WINDOW_WIDTH, DEFAULT_WINDOW_HEIGHT)
+        self.renderer = Renderer(self.screen, self.layout)
 
         # Player interaction state
         self.selected_territory: Territory | None = None
@@ -73,6 +77,7 @@ class Game:
         # Key hold state for accelerating repeat
         self._key_hold_start: dict[int, float] = {}  # key -> time when hold started
         self._key_last_trigger: dict[int, float] = {}  # key -> last trigger time
+        self._space_hold_start: float | None = None  # For fast-forward when eliminated
 
         # Stat scale level (0 = normal, 1 = K, 2 = M, 3 = B, 4 = T, 5 = C, 6 = Q)
         self.stat_scale_level: int = 0
@@ -117,11 +122,34 @@ class Game:
             ):
                 self.running = False
 
+            # Handle window resize
+            if event.type == pygame.VIDEORESIZE:
+                self._handle_resize(event.w, event.h)
+
             # Handle player turn
             if self.phase == GamePhase.PLAYER_TURN:
                 self._handle_player_input(event)
             elif self.phase == GamePhase.AI_TURN:
                 self._handle_ai_phase_input(event)
+
+    def _handle_resize(self, width: int, height: int) -> None:
+        """Handle window resize event.
+
+        Args:
+            width: New window width
+            height: New window height
+        """
+        # Enforce minimum size
+        width = max(width, MIN_WINDOW_WIDTH)
+        height = max(height, MIN_WINDOW_HEIGHT)
+
+        # Update display
+        self.screen = pygame.display.set_mode((width, height), pygame.RESIZABLE)
+
+        # Update layout
+        self.layout.update(width, height)
+        self.renderer.screen = self.screen
+        self.renderer.update_layout(self.layout)
 
     def _handle_player_input(self, event: pygame.event.Event) -> None:
         """Handle input during player's turn."""
@@ -152,13 +180,35 @@ class Game:
         if event.type == pygame.KEYDOWN and event.key == pygame.K_SPACE:
             if self.waiting_for_advance:
                 self.waiting_for_advance = False
+            # Track when SPACE was pressed for hold detection
+            self._space_hold_start = pygame.time.get_ticks() / 1000.0
+        elif event.type == pygame.KEYUP and event.key == pygame.K_SPACE:
+            # Clear hold tracking when released
+            self._space_hold_start = None
+
+    def _check_space_hold_for_eliminated_player(self) -> None:
+        """Auto-advance turns if player is eliminated and holding SPACE."""
+        player = self.teams[0]
+        if not player.is_eliminated():
+            return
+
+        # Check if SPACE is being held long enough (0.3s threshold)
+        keys = pygame.key.get_pressed()
+        if not keys[pygame.K_SPACE]:
+            return
+
+        hold_start = getattr(self, "_space_hold_start", None)
+        if hold_start is None:
+            return
+
+        hold_duration = pygame.time.get_ticks() / 1000.0 - hold_start
+        if hold_duration >= 0.3 and self.waiting_for_advance:
+            self.waiting_for_advance = False
 
     def _handle_territory_click(self, mouse_pos: tuple[int, int]) -> None:
         """Handle clicking on a territory."""
-        # Convert mouse position to grid coordinates
-        x, y = mouse_pos
-        grid_x = (x - MAP_OFFSET_X) // TERRITORY_SIZE
-        grid_y = (y - MAP_OFFSET_Y) // TERRITORY_SIZE
+        # Convert mouse position to grid coordinates using layout
+        grid_x, grid_y = self.layout.get_grid_position(mouse_pos[0], mouse_pos[1])
 
         # Check if click is within map bounds
         territory = self.game_map.get_territory_at(grid_x, grid_y)
@@ -196,9 +246,18 @@ class Game:
                 player, territory.owner, self.selected_territory, territory
             )
             if action.is_valid():
+                # Capture original color before attack changes ownership
+                original_color = territory.owner.color if territory.owner else GRAY
                 result = action.execute()
                 self.last_action_message = result.message
                 self.has_attacked_this_turn = True
+                # Start animation for the attacked territory
+                self.renderer.animations.start_attack_animation(
+                    territory=territory,
+                    original_color=original_color,
+                    attacker_color=player.color,
+                    success=result.success,
+                )
                 # Deselect after action
                 self.selected_territory = None
 
@@ -228,11 +287,19 @@ class Game:
 
     def _end_player_turn(self) -> None:
         """End the player's turn and start AI turns."""
-        self.current_team_index = 1
-        self.phase = GamePhase.AI_TURN
         # Clear any key hold state
         self._key_hold_start.clear()
         self._key_last_trigger.clear()
+
+        # Find the first active AI team
+        next_team = self._find_next_active_team(1)
+        if next_team is not None:
+            self.current_team_index = next_team
+            self.phase = GamePhase.AI_TURN
+            self.waiting_for_advance = True  # Wait before first AI acts
+        else:
+            # No AI teams left, start new turn
+            self._start_new_turn()
 
     def _check_win_condition(self) -> None:
         """Check if any team controls all territories."""
@@ -245,6 +312,10 @@ class Game:
 
     def update(self) -> None:
         """Update game state."""
+        # Update animations (always, even during game over for visual polish)
+        dt = self.clock.get_time() / 1000.0  # Convert ms to seconds
+        self.renderer.update_animations(dt)
+
         if self.phase == GamePhase.GAME_OVER:
             return
 
@@ -256,6 +327,7 @@ class Game:
         if self.phase == GamePhase.PLAYER_TURN:
             self._update_key_holds()
         elif self.phase == GamePhase.AI_TURN:
+            self._check_space_hold_for_eliminated_player()
             self._process_ai_turn()
         elif self.phase == GamePhase.BETWEEN_TURNS:
             self._start_new_turn()
@@ -302,20 +374,28 @@ class Game:
             return
 
         if self.current_team_index >= len(self.teams):
-            # All teams have acted, move to between turns
-            self.phase = GamePhase.BETWEEN_TURNS
+            # All teams have acted, start new turn directly
+            self._start_new_turn()
             return
 
         current_team = self.teams[self.current_team_index]
 
         # Skip eliminated teams (don't wait for input)
         if current_team.is_eliminated():
-            self.current_team_index += 1
+            next_team = self._find_next_active_team(self.current_team_index + 1)
+            if next_team is not None:
+                self.current_team_index = next_team
+            else:
+                self._start_new_turn()
             return
 
         # Skip player (should not happen but just in case)
         if current_team.is_player:
-            self.current_team_index += 1
+            next_team = self._find_next_active_team(self.current_team_index + 1)
+            if next_team is not None:
+                self.current_team_index = next_team
+            else:
+                self._start_new_turn()
             return
 
         # Find the AI controller for this team
@@ -323,19 +403,41 @@ class Game:
             if controller.team is current_team:
                 action = controller.decide_action(self.teams)
                 if action and action.is_valid():
-                    action.execute()
+                    # For attack actions, trigger animation
+                    if isinstance(action, AttackAction):
+                        target_territory = action.to_territory
+                        original_color = (
+                            target_territory.owner.color
+                            if target_territory.owner
+                            else GRAY
+                        )
+                        result = action.execute()
+                        self.renderer.animations.start_attack_animation(
+                            territory=target_territory,
+                            original_color=original_color,
+                            attacker_color=current_team.color,
+                            success=result.success,
+                        )
+                    else:
+                        action.execute()
                 break
 
-        # Move to next team and wait for player to advance
-        self.current_team_index += 1
-        self.waiting_for_advance = True
+        # Move to next active team
+        next_team = self._find_next_active_team(self.current_team_index + 1)
+        if next_team is not None:
+            self.current_team_index = next_team
+            self.waiting_for_advance = True
+        else:
+            # All teams have acted, start new turn
+            self._start_new_turn()
 
     def _apply_turn_stat_changes(self) -> None:
         """Apply per-turn stat changes to all teams."""
+        total_territories = self.game_map.total_territories
         for team in self.teams:
             if not team.is_eliminated():
-                team.apply_resource_growth()
-                team.apply_happiness_decay(HAPPINESS_DECAY_PER_TURN)
+                team.apply_resource_growth(total_territories)
+                team.apply_happiness_decay(HAPPINESS_DECAY_RATE)
 
     def _normalize_stats_if_needed(self) -> None:
         """Scale down all team stats proportionally if any exceed threshold.
@@ -372,15 +474,44 @@ class Game:
         """Get the current scale suffix for display."""
         return STAT_SCALE_SUFFIXES[self.stat_scale_level]
 
+    def _find_next_active_team(self, start_index: int) -> int | None:
+        """Find the next non-eliminated team starting from start_index.
+
+        Args:
+            start_index: Index to start searching from
+
+        Returns:
+            Index of next active team, or None if all remaining teams are eliminated
+        """
+        for i in range(start_index, len(self.teams)):
+            if not self.teams[i].is_eliminated():
+                return i
+        return None
+
     def _start_new_turn(self) -> None:
         """Start a new turn."""
         self._apply_turn_stat_changes()
         self._normalize_stats_if_needed()
         self.current_turn += 1
-        self.current_team_index = 0
-        self.phase = GamePhase.PLAYER_TURN
         self.has_attacked_this_turn = False
         self.waiting_for_advance = False
+        self.last_action_message = None
+
+        # Check if player (index 0) is still active
+        player = self.teams[0]
+        if not player.is_eliminated():
+            self.current_team_index = 0
+            self.phase = GamePhase.PLAYER_TURN
+        else:
+            # Player is eliminated, skip to first active AI team
+            next_team = self._find_next_active_team(1)
+            if next_team is not None:
+                self.current_team_index = next_team
+                self.phase = GamePhase.AI_TURN
+                self.waiting_for_advance = True
+            else:
+                # No active teams left (shouldn't happen if win condition works)
+                self.current_team_index = len(self.teams)
 
     def draw(self) -> None:
         """Render the game."""
@@ -399,13 +530,17 @@ class Game:
                 f"{self.winner.name} wins! Total domination achieved. ESC to quit."
             )
         elif self.phase == GamePhase.AI_TURN and self.waiting_for_advance:
-            # Show which team just acted (previous team index)
-            prev_index = self.current_team_index - 1
-            if 0 < prev_index < len(self.teams):
-                team_name = self.teams[prev_index].name
-                self.renderer.render_message(
-                    f"{team_name}'s turn complete - SPACE to continue"
-                )
+            if self.current_team_index < len(self.teams):
+                current_team = self.teams[self.current_team_index]
+                player = self.teams[0]
+                if player.is_eliminated():
+                    self.renderer.render_message(
+                        f"{current_team.name}'s turn - Hold SPACE to fast-forward"
+                    )
+                else:
+                    self.renderer.render_message(
+                        f"{current_team.name}'s turn - SPACE to proceed"
+                    )
         elif self.phase == GamePhase.PLAYER_TURN:
             if self.last_action_message:
                 self.renderer.render_message(self.last_action_message)
@@ -415,7 +550,7 @@ class Game:
                 )
             else:
                 player = self.teams[0]
-                msg = f"{player.name}'s Turn - H:Happiness M:Military SPACE:End"
+                msg = f"{player.name}'s Turn - H: Happiness, M: Military, SPACE: End"
                 self.renderer.render_message(msg)
 
         pygame.display.flip()

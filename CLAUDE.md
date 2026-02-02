@@ -143,5 +143,4 @@ When adding new game features:
 ## Future Extension Points
 1. **Diplomacy**: Implement in `actions/negotiate.py`
 2. **AI Personalities**: Subclass `AIController` with different `stat_priorities`
-3. **Win Conditions**: Check in `game.py` update loop
-4. **Events**: Add random occurrences module
+3. **Events**: Add random occurrences module
