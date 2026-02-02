@@ -93,50 +93,95 @@ class GameMap:
     ) -> None:
         """Assign clustered starting territories to each team.
 
-        Each team gets a cluster of adjacent territories starting from
-        different corners/edges of the map.
+        Each team gets a cluster of adjacent territories. Starting positions
+        are randomized while ensuring teams have enough space for their cluster.
         """
-        # Starting positions spread across the map
-        # For 6 teams on a 10x8 grid, use corners and mid-edges
-        start_positions = [
-            (1, 1),  # Top-left
-            (self.cols - 2, 1),  # Top-right
-            (1, self.rows - 2),  # Bottom-left
-            (self.cols - 2, self.rows - 2),  # Bottom-right
-            (self.cols // 2, 1),  # Top-center
-            (self.cols // 2, self.rows - 2),  # Bottom-center
+        # Track which territories are already taken
+        taken: set[int] = set()
+
+        for team in teams:
+            start_pos = self._find_random_start(taken, territories_per_team)
+            if start_pos is None:
+                continue
+
+            start_x, start_y = start_pos
+            assigned_ids = self._assign_cluster(
+                team, start_x, start_y, territories_per_team, taken
+            )
+            taken.update(assigned_ids)
+
+    def _find_random_start(
+        self, taken: set[int], cluster_size: int
+    ) -> tuple[int, int] | None:
+        """Find a random starting position that can grow into a cluster.
+
+        Returns a position where we can assign cluster_size adjacent territories.
+        """
+        # Get all available positions
+        available = [
+            (t.grid_x, t.grid_y)
+            for t in self.territories.values()
+            if t.id not in taken
         ]
+        random.shuffle(available)
 
-        for i, team in enumerate(teams):
-            if i >= len(start_positions):
-                break
+        # Try each position until we find one that works
+        for x, y in available:
+            if self._can_grow_cluster(x, y, taken, cluster_size):
+                return (x, y)
 
-            start_x, start_y = start_positions[i]
-            self._assign_cluster(team, start_x, start_y, territories_per_team)
+        return None
 
-    def _assign_cluster(
-        self, team: Team, start_x: int, start_y: int, count: int
-    ) -> None:
-        """Assign a cluster of territories starting from a position."""
-        assigned = 0
+    def _can_grow_cluster(
+        self, start_x: int, start_y: int, taken: set[int], size: int
+    ) -> bool:
+        """Check if we can grow a cluster of the given size from start position."""
+        count = 0
         to_check = [(start_x, start_y)]
-        checked = set()
+        checked: set[tuple[int, int]] = set()
 
-        while to_check and assigned < count:
+        while to_check and count < size:
             x, y = to_check.pop(0)
             if (x, y) in checked:
                 continue
             checked.add((x, y))
 
             territory = self.get_territory_at(x, y)
-            if territory and territory.owner is None:
+            if territory and territory.id not in taken:
+                count += 1
+                neighbors = [(x - 1, y), (x + 1, y), (x, y - 1), (x, y + 1)]
+                to_check.extend(neighbors)
+
+        return count >= size
+
+    def _assign_cluster(
+        self, team: Team, start_x: int, start_y: int, count: int, taken: set[int]
+    ) -> set[int]:
+        """Assign a cluster of territories starting from a position.
+
+        Returns the set of territory IDs that were assigned.
+        """
+        assigned_ids: set[int] = set()
+        to_check = [(start_x, start_y)]
+        checked: set[tuple[int, int]] = set()
+
+        while to_check and len(assigned_ids) < count:
+            x, y = to_check.pop(0)
+            if (x, y) in checked:
+                continue
+            checked.add((x, y))
+
+            territory = self.get_territory_at(x, y)
+            if territory and territory.id not in taken and territory.owner is None:
                 team.add_territory(territory)
-                assigned += 1
+                assigned_ids.add(territory.id)
 
                 # Add neighbors to check (shuffled for variety)
                 neighbors = [(x - 1, y), (x + 1, y), (x, y - 1), (x, y + 1)]
                 random.shuffle(neighbors)
                 to_check.extend(neighbors)
+
+        return assigned_ids
 
     @property
     def total_territories(self) -> int:

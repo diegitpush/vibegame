@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import random
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING
 
@@ -59,17 +58,21 @@ class Team:
         """Check if the team has been eliminated (no territories)."""
         return len(self.territories) == 0
 
-    def apply_resource_growth(self) -> int:
-        """Calculate and apply resource growth. Returns total gained."""
-        base = int(self.territory_count * random.random())
-        bonus = int(self.happiness * random.random())
-        total = base + bonus
-        self.resources += total
-        return total
+    def apply_resource_growth(self, total_territories: int) -> float:
+        """Calculate and apply resource growth. Returns total gained.
 
-    def apply_happiness_decay(self, amount: float = 5.0) -> None:
-        """Apply happiness decay, clamping at 0."""
-        self.happiness = max(0.0, self.happiness - amount)
+        Formula: happiness * (territory_count / total_territories)
+        """
+        if total_territories <= 0:
+            return 0.0
+        territory_ratio = self.territory_count / total_territories
+        gained = self.happiness * territory_ratio
+        self.resources += gained
+        return gained
+
+    def apply_happiness_decay(self, rate: float = 0.10) -> None:
+        """Apply percentage-based happiness decay (e.g., 0.10 = 10%)."""
+        self.happiness = max(0.0, self.happiness * (1.0 - rate))
 
     def spend_on_happiness(self, amount: float) -> bool:
         """Spend resources on happiness (1:1). Returns True if successful."""

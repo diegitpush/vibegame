@@ -14,7 +14,7 @@ def game(monkeypatch):
     mock_font = MagicMock()
 
     monkeypatch.setattr("pygame.init", lambda: None)
-    monkeypatch.setattr("pygame.display.set_mode", lambda size: mock_surface)
+    monkeypatch.setattr("pygame.display.set_mode", lambda size, flags=0: mock_surface)
     monkeypatch.setattr("pygame.display.set_caption", lambda title: None)
     monkeypatch.setattr("pygame.time.Clock", lambda: MagicMock())
     monkeypatch.setattr("pygame.font.Font", lambda name, size: mock_font)
