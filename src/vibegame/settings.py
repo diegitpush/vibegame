@@ -38,6 +38,10 @@ STARTING_MILITARY = 25.0
 HAPPINESS_DECAY_RATE = 0.10  # 10% decay per turn
 RESOURCE_SPEND_INCREMENT = 10.0
 
+# Alliance settings
+ALLIANCE_DURATION = 15  # Turns an alliance lasts
+ALLIANCE_MIN_SHARED_BORDERS = 3  # Minimum adjacent squares to offer alliance
+
 # Stat normalization (prevents overflow from large numbers)
 STAT_NORMALIZATION_THRESHOLD = 100_000.0  # When any stat exceeds this, normalize
 STAT_NORMALIZATION_DIVISOR = 1000.0  # Divide all stats by this amount

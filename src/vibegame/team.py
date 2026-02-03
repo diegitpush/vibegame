@@ -28,6 +28,12 @@ class Team:
     # AI decision-making weights (higher = more priority)
     stat_priorities: dict[str, float] = field(default_factory=dict)
 
+    # Active alliances: maps allied team name to turns remaining
+    alliances: dict[str, int] = field(default_factory=dict)
+
+    # Pending alliance offers received: maps offering team name to True
+    pending_alliance_offers: dict[str, bool] = field(default_factory=dict)
+
     def __post_init__(self) -> None:
         """Set default stat priorities if not provided."""
         if not self.stat_priorities:
@@ -89,3 +95,63 @@ class Team:
             self.military_power += amount
             return True
         return False
+
+    def is_allied_with(self, other: Team) -> bool:
+        """Check if this team has an active alliance with another team."""
+        return other.name in self.alliances and self.alliances[other.name] > 0
+
+    def get_alliance_turns_remaining(self, other: Team) -> int:
+        """Get the number of turns remaining in an alliance with another team."""
+        return self.alliances.get(other.name, 0)
+
+    def form_alliance(self, other: Team, duration: int = 15) -> bool:
+        """Form an alliance with another team.
+
+        Both teams pay 1/3 of their happiness as the cost.
+        Returns True if alliance was formed successfully.
+        """
+        happiness_cost_self = self.happiness / 3
+        happiness_cost_other = other.happiness / 3
+
+        # Apply happiness costs
+        self.happiness -= happiness_cost_self
+        other.happiness -= happiness_cost_other
+
+        # Set up alliance on both sides (using team names as keys)
+        self.alliances[other.name] = duration
+        other.alliances[self.name] = duration
+
+        return True
+
+    def tick_alliances(self) -> list[str]:
+        """Decrement alliance turns and remove expired alliances.
+
+        Returns list of team names whose alliances just expired.
+        """
+        expired: list[str] = []
+        names_to_remove: list[str] = []
+
+        for team_name, turns in self.alliances.items():
+            if turns <= 1:
+                expired.append(team_name)
+                names_to_remove.append(team_name)
+            else:
+                self.alliances[team_name] = turns - 1
+
+        for team_name in names_to_remove:
+            del self.alliances[team_name]
+
+        return expired
+
+    def clear_pending_offer_from(self, team: Team) -> None:
+        """Clear a pending alliance offer from a specific team."""
+        if team.name in self.pending_alliance_offers:
+            del self.pending_alliance_offers[team.name]
+
+    def has_pending_offer_from(self, team: Team) -> bool:
+        """Check if there's a pending alliance offer from a team."""
+        return team.name in self.pending_alliance_offers
+
+    def add_pending_offer_from(self, team: Team) -> None:
+        """Add a pending alliance offer from a team."""
+        self.pending_alliance_offers[team.name] = True

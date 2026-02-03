@@ -21,6 +21,9 @@ if TYPE_CHECKING:
     from vibegame.world.map import GameMap
     from vibegame.world.territory import Territory
 
+# Alliance border color - bright cyan/turquoise to stand out
+ALLIANCE_BORDER_COLOR = (0, 255, 200)
+
 
 class Renderer:
     """Handles all game rendering."""
@@ -80,15 +83,18 @@ class Renderer:
             stat_scale_suffix: Suffix to display after stat values (K, M, B, etc.)
         """
         self.screen.fill(BLACK)
-        self._render_map(game_map, selected_territory)
+        self._render_map(game_map, teams, selected_territory)
         self._render_stats_panel(
             teams, current_turn, current_team_index, stat_scale_suffix
         )
 
     def _render_map(
-        self, game_map: GameMap, selected_territory: Territory | None = None
+        self,
+        game_map: GameMap,
+        teams: list[Team],
+        selected_territory: Territory | None = None,
     ) -> None:
-        """Render the territory map."""
+        """Render the territory map with alliance borders."""
         territory_size = self.layout.territory_size
         offset_x = self.layout.map_offset_x
         offset_y = self.layout.map_offset_y
@@ -113,6 +119,66 @@ class Renderer:
                 highlight_width = max(2, territory_size // 15)
                 pygame.draw.rect(self.screen, WHITE, rect, highlight_width)
 
+        # Draw alliance borders on top (thicker lines between allied territories)
+        self._render_alliance_borders(game_map, teams)
+
+    def _render_alliance_borders(self, game_map: GameMap, teams: list[Team]) -> None:
+        """Render special borders between allied teams' territories."""
+        territory_size = self.layout.territory_size
+        offset_x = self.layout.map_offset_x
+        offset_y = self.layout.map_offset_y
+        border_width = max(3, territory_size // 12)  # Thicker border for visibility
+
+        # Track which edges we've already drawn to avoid duplicates
+        drawn_edges: set[tuple[int, int]] = set()
+
+        for territory in game_map.territories.values():
+            if territory.owner is None:
+                continue
+
+            x = offset_x + territory.grid_x * territory_size
+            y = offset_y + territory.grid_y * territory_size
+
+            # Check each neighbor for alliance relationship
+            for neighbor in game_map.get_neighbors(territory.id):
+                if neighbor.owner is None:
+                    continue
+
+                # Check if these two teams are allied
+                if not territory.owner.is_allied_with(neighbor.owner):
+                    continue
+
+                # Create a unique edge identifier (smaller id first)
+                edge_id = (
+                    min(territory.id, neighbor.id),
+                    max(territory.id, neighbor.id),
+                )
+                if edge_id in drawn_edges:
+                    continue
+                drawn_edges.add(edge_id)
+
+                # Draw the alliance border on the shared edge based on neighbor position
+                if neighbor.grid_x > territory.grid_x:
+                    # Neighbor is to the right - draw right edge of territory
+                    start = (x + territory_size, y)
+                    end = (x + territory_size, y + territory_size)
+                elif neighbor.grid_x < territory.grid_x:
+                    # Neighbor is to the left - draw left edge of territory
+                    start = (x, y)
+                    end = (x, y + territory_size)
+                elif neighbor.grid_y > territory.grid_y:
+                    # Neighbor is below - draw bottom edge of territory
+                    start = (x, y + territory_size)
+                    end = (x + territory_size, y + territory_size)
+                else:
+                    # Neighbor is above - draw top edge of territory
+                    start = (x, y)
+                    end = (x + territory_size, y)
+
+                pygame.draw.line(
+                    self.screen, ALLIANCE_BORDER_COLOR, start, end, border_width
+                )
+
     def _render_stats_panel(
         self,
         teams: list[Team],
@@ -136,8 +202,9 @@ class Renderer:
         # Line height equals font size (no extra spacing)
         line_height = self.layout.font_small_size
 
-        # Calculate team block height: gap + name + 4 stats
-        team_content_height = gap + self.layout.font_medium_size + (4 * line_height)
+        # Calculate team block height: gap + name + 4 stats + alliance line
+        # Always reserve space for alliance line to prevent overlap
+        team_content_height = gap + self.layout.font_medium_size + (5 * line_height)
 
         # Header height
         header_height = gap + self.layout.font_large_size + gap
@@ -182,6 +249,27 @@ class Renderer:
                 stat_text = self.font_small.render(stat, True, WHITE)
                 stat_y = stats_y + j * line_height
                 self.screen.blit(stat_text, (panel_x + padding_x, stat_y))
+
+            # Show alliance info if team has any
+            if team.alliances:
+                alliance_y = stats_y + 4 * line_height
+                ally_names = [
+                    f"{ally_name}({turns})"
+                    for ally_name, turns in team.alliances.items()
+                ]
+                alliance_str = "Allies: " + ", ".join(ally_names)
+                # Truncate if too long
+                max_width = panel_width - padding_x * 2
+                alliance_text = self.font_small.render(
+                    alliance_str, True, ALLIANCE_BORDER_COLOR
+                )
+                if alliance_text.get_width() > max_width:
+                    # Show shortened version
+                    alliance_str = f"Allies: {len(team.alliances)}"
+                    alliance_text = self.font_small.render(
+                        alliance_str, True, ALLIANCE_BORDER_COLOR
+                    )
+                self.screen.blit(alliance_text, (panel_x + padding_x, alliance_y))
 
             y_offset += team_content_height
 

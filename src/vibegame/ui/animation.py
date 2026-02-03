@@ -129,9 +129,7 @@ class AnimationManager:
         for territory_id in completed:
             del self._animations[territory_id]
 
-    def get_territory_color(
-        self, territory: Territory, default_color: Color
-    ) -> Color:
+    def get_territory_color(self, territory: Territory, default_color: Color) -> Color:
         """Get the current display color for a territory.
 
         Args:

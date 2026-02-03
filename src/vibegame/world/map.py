@@ -119,9 +119,7 @@ class GameMap:
         """
         # Get all available positions
         available = [
-            (t.grid_x, t.grid_y)
-            for t in self.territories.values()
-            if t.id not in taken
+            (t.grid_x, t.grid_y) for t in self.territories.values() if t.id not in taken
         ]
         random.shuffle(available)
 
