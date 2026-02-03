@@ -5,8 +5,14 @@ from enum import Enum, auto
 import pygame
 
 from vibegame.actions.attack import AttackAction
+from vibegame.actions.negotiate import (
+    AcceptAllianceAction,
+    DeclineAllianceAction,
+    NegotiateAction,
+)
 from vibegame.ai.controller import AIController
 from vibegame.settings import (
+    ALLIANCE_MIN_SHARED_BORDERS,
     DEFAULT_WINDOW_HEIGHT,
     DEFAULT_WINDOW_WIDTH,
     FPS,
@@ -71,7 +77,13 @@ class Game:
         # Player interaction state
         self.selected_territory: Territory | None = None
         self.last_action_message: str | None = None
-        self.has_attacked_this_turn: bool = False
+        # Attack state tracking:
+        # - Capturing empty territory ends all attacks for the turn
+        # - Attacking enemies allows more enemy attacks but not empty captures
+        # - Each territory can only be attacked once per turn
+        self.has_captured_empty_this_turn: bool = False
+        self.has_attacked_enemy_this_turn: bool = False
+        self.attacked_territories_this_turn: set[int] = set()
         self.waiting_for_advance: bool = False  # True when waiting for SPACE to advance
 
         # Key hold state for accelerating repeat
@@ -84,6 +96,10 @@ class Game:
 
         # Win condition
         self.winner: Team | None = None
+
+        # Alliance negotiation state
+        self.negotiation_target: Team | None = None  # Target for alliance offer
+        self.pending_player_offer: Team | None = None  # Team offering player alliance
 
         # Set up the game
         self._create_teams()
@@ -156,6 +172,7 @@ class Game:
         if event.type == pygame.KEYDOWN:
             if event.key == pygame.K_SPACE:
                 self.selected_territory = None
+                self.negotiation_target = None
                 self._end_player_turn()
             elif event.key in (pygame.K_h, pygame.K_m):
                 # Record hold start time and trigger immediately
@@ -166,6 +183,25 @@ class Game:
                     self._player_spend_on_happiness()
                 else:
                     self._player_spend_on_military()
+            elif event.key == pygame.K_n:
+                # N key - select target or offer alliance to current target
+                self._handle_negotiate_key()
+            elif event.key == pygame.K_TAB:
+                # Tab key - cycle through alliance targets
+                self._cycle_negotiate_target()
+            elif event.key == pygame.K_y:
+                # Y key - accept pending alliance offer
+                if self.pending_player_offer:
+                    self._accept_pending_alliance()
+            elif event.key == pygame.K_x:
+                # X key - decline pending alliance offer
+                if self.pending_player_offer:
+                    self._decline_pending_alliance()
+            elif event.key == pygame.K_ESCAPE:
+                # Cancel negotiation mode
+                if self.negotiation_target:
+                    self.negotiation_target = None
+                    self.last_action_message = "Negotiation cancelled"
         elif event.type == pygame.KEYUP:
             # Clear hold state when key is released
             if event.key in self._key_hold_start:
@@ -237,9 +273,30 @@ class Game:
 
         # Try to attack the clicked territory
         if self.selected_territory.is_adjacent_to(territory):
-            # Check if player already attacked this turn
-            if self.has_attacked_this_turn:
-                self.last_action_message = "Already attacked this turn!"
+            is_empty_territory = territory.owner is None
+
+            # Check attack restrictions based on what player has already done this turn
+            if self.has_captured_empty_this_turn:
+                # Capturing empty territory ends all attacks for the turn
+                self.last_action_message = "Turn ended after capturing empty territory!"
+                return
+
+            if is_empty_territory and self.has_attacked_enemy_this_turn:
+                # Can't capture empty after attacking enemies
+                self.last_action_message = "Cannot capture empty after attacking!"
+                return
+
+            if territory.id in self.attacked_territories_this_turn:
+                self.last_action_message = "Already attacked this territory!"
+                return
+
+            # Check if trying to attack an ally
+            if territory.owner and player.is_allied_with(territory.owner):
+                turns_left = player.get_alliance_turns_remaining(territory.owner)
+                ally_name = territory.owner.name
+                self.last_action_message = (
+                    f"Cannot attack ally {ally_name}! ({turns_left} turns left)"
+                )
                 return
 
             action = AttackAction(
@@ -250,7 +307,14 @@ class Game:
                 original_color = territory.owner.color if territory.owner else GRAY
                 result = action.execute()
                 self.last_action_message = result.message
-                self.has_attacked_this_turn = True
+
+                # Update attack state based on target type
+                if is_empty_territory:
+                    self.has_captured_empty_this_turn = True
+                else:
+                    self.has_attacked_enemy_this_turn = True
+                self.attacked_territories_this_turn.add(territory.id)
+
                 # Start animation for the attacked territory
                 self.renderer.animations.start_attack_animation(
                     territory=territory,
@@ -284,6 +348,162 @@ class Game:
             self.last_action_message = f"Spent {int(amount)} on Military!"
         else:
             self.last_action_message = "Not enough resources!"
+
+    def _count_shared_borders_with(self, team1: Team, team2: Team) -> int:
+        """Count shared border edges between two teams."""
+        shared = 0
+        for territory in team1.territories:
+            for neighbor in self.game_map.get_neighbors(territory.id):
+                if neighbor.owner is team2:
+                    shared += 1
+        return shared
+
+    def _get_valid_alliance_targets(self) -> list[Team]:
+        """Get list of teams that player can offer alliance to."""
+        player = self.teams[0]
+        valid_targets = []
+
+        for team in self.teams:
+            if team is player:
+                continue
+            if team.is_eliminated():
+                continue
+            if player.is_allied_with(team):
+                continue
+
+            shared = self._count_shared_borders_with(player, team)
+            if shared >= ALLIANCE_MIN_SHARED_BORDERS:
+                valid_targets.append(team)
+
+        return valid_targets
+
+    def _handle_negotiate_key(self) -> None:
+        """Handle N key press for negotiation."""
+        player = self.teams[0]
+
+        # If there's a pending offer, remind player about Y/X
+        if self.pending_player_offer:
+            offer_name = self.pending_player_offer.name
+            self.last_action_message = (
+                f"{offer_name} offers alliance! Y: Accept, X: Decline"
+            )
+            return
+
+        valid_targets = self._get_valid_alliance_targets()
+
+        if not valid_targets:
+            self.last_action_message = (
+                f"No valid targets (need {ALLIANCE_MIN_SHARED_BORDERS}+ shared borders)"
+            )
+            return
+
+        # If no target selected, select the first one
+        if self.negotiation_target is None:
+            self.negotiation_target = valid_targets[0]
+            shared = self._count_shared_borders_with(player, self.negotiation_target)
+            self.last_action_message = (
+                f"Target: {self.negotiation_target.name} ({shared} borders) - "
+                f"N: offer, TAB: cycle, ESC: cancel"
+            )
+        else:
+            # Target already selected - offer alliance
+            self._offer_alliance_to_target()
+
+    def _cycle_negotiate_target(self) -> None:
+        """Cycle to the next valid alliance target."""
+        player = self.teams[0]
+
+        valid_targets = self._get_valid_alliance_targets()
+
+        if not valid_targets:
+            self.last_action_message = (
+                f"No valid targets (need {ALLIANCE_MIN_SHARED_BORDERS}+ shared borders)"
+            )
+            return
+
+        if self.negotiation_target is None:
+            # No target yet, select the first one
+            self.negotiation_target = valid_targets[0]
+        else:
+            # Cycle to next target
+            try:
+                current_idx = valid_targets.index(self.negotiation_target)
+                next_idx = (current_idx + 1) % len(valid_targets)
+                self.negotiation_target = valid_targets[next_idx]
+            except ValueError:
+                self.negotiation_target = valid_targets[0]
+
+        shared = self._count_shared_borders_with(player, self.negotiation_target)
+        self.last_action_message = (
+            f"Target: {self.negotiation_target.name} ({shared} borders) - "
+            f"N: offer, TAB: cycle, ESC: cancel"
+        )
+
+    def _offer_alliance_to_target(self) -> None:
+        """Offer alliance to the current negotiation target."""
+        player = self.teams[0]
+
+        if self.negotiation_target is None:
+            return
+
+        action = NegotiateAction(player, self.negotiation_target, self.game_map)
+        if action.is_valid():
+            result = action.execute()
+            self.last_action_message = result.message
+        else:
+            shared = self._count_shared_borders_with(player, self.negotiation_target)
+            self.last_action_message = (
+                f"Cannot ally with {self.negotiation_target.name} "
+                f"({shared}/{ALLIANCE_MIN_SHARED_BORDERS} borders)"
+            )
+
+        self.negotiation_target = None
+
+    def _accept_pending_alliance(self) -> None:
+        """Accept a pending alliance offer."""
+        player = self.teams[0]
+
+        if self.pending_player_offer is None:
+            return
+
+        action = AcceptAllianceAction(player, self.pending_player_offer)
+        if action.is_valid():
+            result = action.execute()
+            self.last_action_message = result.message
+        else:
+            self.last_action_message = "Cannot accept alliance"
+
+        self.pending_player_offer = None
+
+    def _decline_pending_alliance(self) -> None:
+        """Decline a pending alliance offer."""
+        player = self.teams[0]
+
+        if self.pending_player_offer is None:
+            return
+
+        action = DeclineAllianceAction(player, self.pending_player_offer)
+        if action.is_valid():
+            result = action.execute()
+            self.last_action_message = result.message
+        else:
+            self.last_action_message = "Cannot decline alliance"
+
+        self.pending_player_offer = None
+
+    def _check_pending_player_offers(self) -> None:
+        """Check if any team has sent an alliance offer to the player."""
+        player = self.teams[0]
+
+        for offering_team_name in list(player.pending_alliance_offers.keys()):
+            # Find the actual team object by name
+            for team in self.teams:
+                if team.name == offering_team_name:
+                    self.pending_player_offer = team
+                    self.last_action_message = (
+                        f"{team.name} offers alliance! Y: Accept, X: Decline"
+                    )
+                    return  # Only show one offer at a time
 
     def _end_player_turn(self) -> None:
         """End the player's turn and start AI turns."""
@@ -488,21 +708,38 @@ class Game:
                 return i
         return None
 
+    def _tick_alliances(self) -> None:
+        """Decrement alliance turns for all teams and remove expired alliances."""
+        for team in self.teams:
+            if team.is_eliminated():
+                continue
+            expired = team.tick_alliances()
+            # Show message if player's alliance expired
+            if team.is_player and expired and self.last_action_message is None:
+                expired_names = ", ".join(expired)
+                self.last_action_message = f"Alliance with {expired_names} expired!"
+
     def _start_new_turn(self) -> None:
         """Start a new turn."""
         self._apply_turn_stat_changes()
+        self._tick_alliances()
         self._normalize_stats_if_needed()
         self.current_turn += 1
-        self.has_attacked_this_turn = False
+        self.has_captured_empty_this_turn = False
+        self.has_attacked_enemy_this_turn = False
+        self.attacked_territories_this_turn.clear()
         self.waiting_for_advance = False
-        self.last_action_message = None
+        self.negotiation_target = None
 
         # Check if player (index 0) is still active
         player = self.teams[0]
         if not player.is_eliminated():
             self.current_team_index = 0
             self.phase = GamePhase.PLAYER_TURN
+            # Check for pending alliance offers to player
+            self._check_pending_player_offers()
         else:
+            self.last_action_message = None
             # Player is eliminated, skip to first active AI team
             next_team = self._find_next_active_team(1)
             if next_team is not None:
@@ -544,13 +781,21 @@ class Game:
         elif self.phase == GamePhase.PLAYER_TURN:
             if self.last_action_message:
                 self.renderer.render_message(self.last_action_message)
+            elif self.negotiation_target:
+                shared = self._count_shared_borders_with(
+                    self.teams[0], self.negotiation_target
+                )
+                self.renderer.render_message(
+                    f"Target: {self.negotiation_target.name} ({shared} borders) - "
+                    f"N: offer, TAB: cycle, ESC: cancel"
+                )
             elif self.selected_territory:
                 self.renderer.render_message(
                     "Click adjacent territory to attack, or SPACE to end turn"
                 )
             else:
                 player = self.teams[0]
-                msg = f"{player.name}'s Turn - H: Happiness, M: Military, SPACE: End"
+                msg = f"{player.name}'s Turn - H/M: spend, N: negotiate, SPACE: End"
                 self.renderer.render_message(msg)
 
         pygame.display.flip()

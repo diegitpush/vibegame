@@ -48,6 +48,7 @@ class AttackAction(Action):
         - For enemy territories: target matches the territory owner
         - For empty territories: target is None and territory is unowned
         - Territories are adjacent
+        - Actor and target are not allied
         """
         # Actor must own the source territory
         if self.from_territory.owner is not self.actor:
@@ -59,6 +60,10 @@ class AttackAction(Action):
 
         # Target must match the territory owner
         if self.to_territory.owner is not self.target:
+            return False
+
+        # Cannot attack allied teams
+        if self.target is not None and self.actor.is_allied_with(self.target):
             return False
 
         # Territories must be adjacent
@@ -91,9 +96,10 @@ class AttackAction(Action):
         defender_roll = self.target.military_power * random.uniform(0, 5)
 
         if attacker_roll > defender_roll:
-            # Attacker wins - capture the territory
+            # Attacker wins - capture the territory but lose 10% military power
             self.target.remove_territory(self.to_territory)
             self.actor.add_territory(self.to_territory)
+            self.actor.military_power = self.actor.military_power * 0.9
             msg = f"{self.actor.name} defeated {self.target.name}"
             return ActionResult(
                 success=True,

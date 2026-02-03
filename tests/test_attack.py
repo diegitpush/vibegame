@@ -156,6 +156,8 @@ class TestCombatResolution:
         assert to_territory.owner is attacker
         assert to_territory in attacker.territories
         assert to_territory not in defender.territories
+        # Attacker loses 10% military power on successful attack
+        assert attacker.military_power == 22.5  # 25 * 0.9
 
     def test_defender_wins_combat(self) -> None:
         """Test that defender wins when they roll higher."""
